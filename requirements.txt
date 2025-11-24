@@ -5,3 +5,4 @@ statsmodels==0.14.5
 numpy==2.0.2
 pandas==2.2.2
 scipy
+scikit-learn
