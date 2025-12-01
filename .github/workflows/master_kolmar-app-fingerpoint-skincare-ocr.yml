@@ -63,4 +63,4 @@ jobs:
         with:
           app-name: 'KOLMAR-APP-Fingerpoint-skincare-ocr'
           slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_23751ECC2AA74B1D9646B93D41A6E170 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_DB9023D63B4E4242B2895A7CFF662CD8 }}
