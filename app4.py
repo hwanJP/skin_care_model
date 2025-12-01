@@ -8,6 +8,10 @@ DEBUG_MODE = False
 EPSILON = 0.01  # 선택된 원료가 반드시 0이 아니게 하기 위한 최소값
 PH_MIN = 4.0
 PH_MAX = 9.0    # 범위를 조금 넉넉하게 잡음
+WATER_MIN = 50  # D.I.WATER 최소함량
+WATER_MAX = 100  # D.I.WATER 최대함량
+DATASET_BOUNDS = '스킨케어1팀_원료 간략화 목록_251127.csv'
+bounds_from_csv = pd.read_csv(DATASET_BOUNDS)
 
 # ====== 1. 공통: 모델 & 데이터 로더 ======
 @st.cache_resource
@@ -34,13 +38,12 @@ def load_model(path: str):
     return model, X, y, df, feature_columns
 
 # ====== pkl 경로 설정 (사용자 환경에 맞게 파일명 확인 필요) ======
-MODEL_PATH_PH_NO_VISC = "linear_regression_pH측정법_점도없음.pkl"
-# MODEL_PATH_VISC_WITH_VISC = "linear_regression_점도값_점도있음.pkl"
-MODEL_PATH_VISC_WITH_VISC = "linear_regression__점도값1000_점도0이상124.pkl"
-MODEL_PATH_PH_WITH_VISC = "linear_regression_pH측정법_점도있음.pkl"
-# MODEL_PATH_VISC_ALL = "linear_regression_점도값_전체326.pkl"
-MODEL_PATH_VISC_ALL = "linear_regression__점도값1000_전체326.pkl"
-MODEL_PATH_PH_ALL = "linear_regression_pH측정법_전체326.pkl"
+MODEL_PATH_PH_NO_VISC = "linear_regression_간략화85all_205x54_pH측정법.pkl" # pH예측, all
+MODEL_PATH_VISC_WITH_VISC = "linear_regression_간략화85점도있음_68x54_점도값1000.pkl" # 점도예측, 점도있음
+MODEL_PATH_PH_WITH_VISC = "linear_regression_간략화85점도있음_68x54_pH측정법.pkl"# pH예측, 점도있음
+
+MODEL_PATH_VISC_ALL = "linear_regression_간략화85all_205x54_점도값1000.pkl" # 점도예측, all
+MODEL_PATH_PH_ALL = "linear_regression_간략화85점도있음_68x54_점도값1000.pkl" # pH예측, 점도있음
 
 # ====== 모델 로드 (파일이 없으면 에러가 나므로 try-except 처리는 생략함) ======
 try:
@@ -52,6 +55,49 @@ try:
 except FileNotFoundError:
     st.error("모델 파일(.pkl)을 찾을 수 없습니다. 경로를 확인해주세요.")
     st.stop()
+
+
+if DEBUG_MODE: 
+
+    # st.write(f"df_ph0: {X_ph0}")
+    # st.write(f"model_visc: {X_visc}")
+    # st.write(f"model_phv: {X_phv}")
+    # st.write(f"model_all_visc: {X_all_visc}")
+    # st.write(f"model_all_ph: {X_all_ph}")
+
+    st.write(f"bounds ")
+    bounds_from_csv = pd.read_csv(DATASET_BOUNDS)
+    st.dataframe(bounds_from_csv)
+
+    bounds_by_dataset = df_all_visc[X_all_visc].describe().loc[['min', 'max'], :].T
+    bounds_by_dataset['idx'] = bounds_by_dataset.index
+    bounds_by_dataset2 = pd.merge(bounds_by_dataset, bounds_from_csv, left_on='idx', right_on='원료명')
+    # bounds_by_dataset.loc['D.I-WATER','min'] = 50
+
+    st.write("bounds_by_dataset")
+    st.write(bounds_by_dataset2)
+    # st.write(bounds_by_dataset.loc['D.I-WATER','min'])
+
+
+def load_bounds(df, X=None):
+    bounds_from_csv = pd.read_csv(DATASET_BOUNDS)
+    
+    if X is None:
+        bounds_by_dataset = df.describe().loc[['min', 'max'], :].T
+    else:
+        bounds_by_dataset = df[X].describe().loc[['min', 'max'], :].T
+
+    bounds_by_dataset['idx'] = bounds_by_dataset.index
+    bounds_by_dataset_temp = pd.merge(bounds_by_dataset, bounds_from_csv, left_on='idx', right_on='원료명')
+    bounds_by_dataset_final = bounds_by_dataset_temp[['min','최대적용함량(%)']]
+    bounds_by_dataset_final.columns = ['min','max']
+    bounds_by_dataset_final.index = bounds_by_dataset['idx'].values
+
+    if DEBUG_MODE:
+        st.write('bounds_by_dataset_final')
+        st.dataframe(bounds_by_dataset_final)
+
+    return bounds_by_dataset_final
 
 # ====== 2. 핵심 예측 함수 (수정됨) ======
 
@@ -71,8 +117,15 @@ def optimize_recipe(
 
     # --- Helper Functions ---
     def build_bounds_from_data():
-        bounds_by_dataset = X_train.describe().loc[['min', 'max'], :].T.values
-        b = bounds_by_dataset.astype(float)
+        # bounds_by_dataset = X_train.describe().loc[['min', 'max'], :].T.values
+        # bounds_by_dataset = df_all_visc[X_all_visc].describe().loc[['min', 'max'], :].T
+        bounds_by_dataset = load_bounds(df_all_visc, X_all_visc)
+
+        # 제약조건 custom
+        bounds_by_dataset.loc['D.I-WATER','min'] = WATER_MIN
+        bounds_by_dataset.loc['D.I-WATER','max'] = WATER_MAX
+        
+        b = bounds_by_dataset.values.astype(float)
         b = np.nan_to_num(b, nan=0.0)
         return b
 
@@ -203,23 +256,38 @@ def optimize_recipe_3(models, X_train, target_value, total: float = 100.0, must_
         model_list = [models]
 
     # 초기값: 평균 함량
-    x0 = np.clip(np.mean(X_train, axis=0), 0.0, None)
+    x0 = np.clip(np.median(X_train, axis=0), 0.0, None)
     s = x0.sum()
     if s > 0: x0 = x0 * (total/s)
 
     cons = ({"type": "eq", "fun": lambda x: np.sum(x) - total})
 
-    bounds_by_dataset = X_train.describe().loc[['min', 'max'], :].T.values
+    # bounds_by_dataset = X_train.describe().loc[['min', 'max'], :].T.values
+    bounds_by_dataset = load_bounds(X_train) # 251201수정
+    # st.write(bounds_by_dataset)
     bounds = bounds_by_dataset.astype(float)
+    # st.write(must_use_idx)
+    # st.write(bounds.iloc[1,:].values)
     
-    # Must Use 적용
+    # Must Use 적용 - 251201수정
     if must_use_idx is not None:
         for idx in must_use_idx:
-            lb, ub = bounds[idx]
-            if ub <= 0: ub = total
+            # lb, ub = bounds[idx]
+            lb, ub = bounds.iloc[idx].values
+            if ub <= 0: 
+                ub = total
             lb = max(lb, EPSILON)
-            if lb >= ub: lb = max(EPSILON, ub * 0.5)
-            bounds[idx] = [lb, ub]
+            if lb >= ub: 
+                lb = max(EPSILON, ub * 0.5)
+            # bounds[idx] = [lb, ub]
+            # bounds.loc[idx, 'min'] = lb # 수정
+            # bounds.loc[idx, 'max'] = ub # 수정
+            bounds.iloc[idx, bounds.columns.get_loc("min")] = lb
+            bounds.iloc[idx, bounds.columns.get_loc("max")] = ub
+
+    # DataFrame -> list of (lb, ub) tuples
+    bounds_for_scipy = [tuple(row) for row in bounds[["min", "max"]].to_numpy()]
+
 
     # [핵심 수정] 다중 타겟 정규화 Objective
     def objective(x):
@@ -236,10 +304,11 @@ def optimize_recipe_3(models, X_train, target_value, total: float = 100.0, must_
     # 1차 시도
     try:
         result = minimize(
-            objective, x0, method="SLSQP", bounds=bounds, constraints=cons,
+            objective, x0, method="SLSQP", bounds=bounds_for_scipy, constraints=cons,
             options={"maxiter": 1000, "ftol": 1e-9}
         )
-    except:
+    except Exception as e:
+        st.write(e)
         return None, None, None
 
     # 1차 실패 시 Bounds 완화 후 재시도 로직 (간소화)
@@ -252,7 +321,8 @@ def optimize_recipe_3(models, X_train, target_value, total: float = 100.0, must_
             result = minimize(
                 objective, x0, method="SLSQP", bounds=bounds_relaxed, constraints=cons
             )
-        except:
+        except Exception as e:
+            st.write(e)
             pass
 
     if not result.success:
@@ -337,7 +407,23 @@ def optimize_recipe_range_v3(models, X_train, target_ph_min, target_ph_max, targ
 
 
 def download_df_to_csv(df, target, name):
-    csv = df.to_csv(index=True, encoding='utf-8-sig')
+    # e.g. name target => pH7.25
+
+    # 수정-251201: all 원료=0인 row 제외
+    df_cols = list(df.columns)
+    df['_zero'] = df[df_cols[1:]].sum(axis=1)
+    cond_non_zero = (df['_zero'] != 0)
+    df_over0 = df[cond_non_zero].iloc[:,:-1]
+
+    # 수정-251201: 세로길이 계산해서 반영
+    num_rows = len(df_over0)
+    row_height = 35 # Approximate height of a row in pixels
+    border_height = 3 # Approximate height for borders
+    calculated_height = (num_rows + 1) * row_height + border_height
+
+    st.dataframe(df_over0, height=calculated_height)
+
+    csv = df_over0.to_csv(index=True).encode("utf-8-sig")
     fn_target_val = f"{name}{target}"
     st.download_button(
         "CSV 다운로드",
@@ -347,11 +433,58 @@ def download_df_to_csv(df, target, name):
     )
 
 
+
+def update_checklist(index, key_check):
+    """체크박스 상태 변경 시, st.session_state.all_checklist_state 업데이트하는 콜백 함수"""
+    # 체크박스의 새로운 상태는 st.session_state[f"{key_check}_{index}"]에 저장되어 있음
+    st.session_state.all_checklist_state[index] = st.session_state[f"{key_check}_{index}"]
+
+
+def expander_search_checklist(ingredients, expander_name, key_check, key_search):
+    # 1. 모든 항목의 체크 상태를 저장할 전역 상태 초기화
+    if "all_checklist_state" not in st.session_state:
+        # ingredients 길이만큼 False로 초기화
+        st.session_state.all_checklist_state = [False] * len(ingredients)
+
+    with st.expander(expander_name):
+        # 검색창 입력 시 Streamlit 앱이 재실행됨
+        query = st.text_input("검색", value="", key=key_search).upper()
+
+        must_use_idx = []
+        for i, name in enumerate(ingredients):
+            # 2. 검색 조건에 맞지 않으면 체크박스를 표시하지 않고 다음 항목으로 이동
+            if query and query not in name.upper():
+                continue
+
+            # 3. 체크박스 생성 및 상태 처리
+            # - key: 각 항목 고유의 키 (i를 포함)
+            # - value: 세션 상태에 저장된 현재 선택 상태를 불러옴
+            # - on_change: 체크 상태 변경 시 콜백 함수(update_checklist) 호출
+            is_checked = st.checkbox(
+                label=name, 
+                value=st.session_state.all_checklist_state[i], # 저장된 값 사용
+                key=f"{key_check}_{i}", 
+                on_change=update_checklist,
+                args=(i, key_check) # 콜백 함수에 전달할 인자
+            )
+
+            # 4. 현재 표시된/필터링된 항목 중 체크된 항목의 인덱스 수집
+            if is_checked:
+                must_use_idx.append(i)
+
+        # 5. 결과를 st.session_state에 저장 (선택 사항, 반환값으로도 사용 가능)
+        # st.session_state.checklist = must_use_idx
+        
+    return must_use_idx
+
+
+
+
 # ================================
 # 3. Streamlit UI
 # ================================
 st.set_page_config(layout="wide", page_title="pH·점도 레시피 예측")
-st.title("pH · 점도 기반 레시피 예측")
+st.subheader("pH · 점도 기반 레시피 예측")
 st.caption("입력한 물성(pH, 점도)을 만족하는 최적의 원료 배합비(Total 100%)를 예측합니다.")
 
 tab_zero, tab_c2, tab_c3 = st.tabs(["① pH 예측 (점도=0)", "② 점도 예측 (점도>0)", "③ pH + 점도 동시 예측"])
@@ -361,14 +494,12 @@ with tab_zero:
     col1, col2 = st.columns([1, 2])
     with col1:
         st.markdown("### 목표 물성 입력")
-        ph_min = st.number_input("pH Min", 4.0, 9.0, 7.0, 0.1)
-        ph_max = st.number_input("pH Max", 4.0, 9.0, 7.5, 0.1)
+        ph_min = st.number_input("pH Min (ph 4.0~7.2)", 4.0, 9.0, 6.0, 0.1)
+        ph_max = st.number_input("pH Max (ph 4.0~7.2)", 4.0, 9.0, 6.5, 0.1)
         
-        must_use_idx_ph0 = []
-        with st.expander("필수 포함 원료 선택"):
-            for i, name in enumerate(feat_ph0):
-                if st.checkbox(name, key=f"t1_{i}"): must_use_idx_ph0.append(i)
-        
+        must_use_idx_ph0 = expander_search_checklist(feat_ph0, "필수 포함 원료 선택", "searh0", "t1")
+        if DEBUG_MODE: st.write(f"must use idx:{must_use_idx_ph0}")
+
         if st.button("실행 (Case 1)", type="primary"):
             with col2:
                 with st.spinner("Calculating..."):
@@ -387,25 +518,26 @@ with tab_zero:
                         for i, res in enumerate(results[:3]): # Top 3만 표시
                             res_df[f"Rank{i+1} ({res['predicted']:.2f})"] = res['recipe']
                         # res_df = res_df.style.format(subset=res_df.columns[1:], formatter="{:.2f}")
+                        
                         res_df = res_df.round(2)
-                        st.dataframe(res_df)
-                        # tn = f"{ph_min}~{ph_max}"
-                        # download_df_to_csv(res_df, tn, "pH")
+                        tn = f"{ph_min}~{ph_max}"                    
+                        download_df_to_csv(res_df, tn, "pH")
 
 # --- Tab 2: Viscosity Only ---
 with tab_c2:
     col1, col2 = st.columns([1, 2])
     with col1:
         st.markdown("### 목표 물성 입력")
-        visc_target = st.number_input("목표 점도 (cP)", 100.0, 50000.0, 5000.0, 100.0)
+        visc_target = st.number_input("목표 점도 (cP, 250~25000)", 100.0, 50000.0, 5000.0, 100.0)
 
         # 예측엔 목표점도를 1000으로 나눈 값으로 예측
         visc_target_for_opt = visc_target / 1000
         
-        must_use_idx_visc = []
-        with st.expander("필수 포함 원료 선택 (점도 데이터)"):
-            for i, name in enumerate(feat_visc):
-                if st.checkbox(name, key=f"t2_{i}"): must_use_idx_visc.append(i)
+        # must_use_idx_visc = []
+        # with st.expander("필수 포함 원료 선택 (점도 데이터)"):
+        #     for i, name in enumerate(feat_visc):
+        #         if st.checkbox(name, key=f"t2_{i}"): must_use_idx_visc.append(i)
+        must_use_idx_visc = expander_search_checklist(feat_visc, "필수 포함 원료 선택", "searh1", "t2")
 
         if st.button("실행 (Case 2)", type="primary"):
             with col2:
@@ -419,34 +551,36 @@ with tab_c2:
                         if fails: st.caption(fails[0]['result'].message)
                     else:
                         best = results[0]
-                        st.success(f"예측 결과 (예측 점도: {best['predicted']*1000})")
+                        st.success(f"예측 결과 (예측 점도: {round(best['predicted']*1000,0)})")
                         
                         res_df = pd.DataFrame({"원료": feat_visc})
                         for i, res in enumerate(results[:3]):
-                            res_df[f"Rank{i+1} ({res['predicted']:.0f})"] = res['recipe']
-                        # res_df = res_df.style.format(subset=res_df.columns[1:], formatter="{:.2f}")
-                        st.dataframe(res_df.round(2))
-                        st.dataframe(res_df)
-                        # tn = f"{visc_target}"
-                        # download_df_to_csv(res_df, tn, "Viscosity")
+                            res_df[f"Rank{i+1} ({res['predicted']:.0f}k)"] = res['recipe']
+
+                        res_df = res_df.round(2)
+                        tn = f"{visc_target}"
+                        
+                        download_df_to_csv(res_df, tn, "visc")
 
 # --- Tab 3: pH + Viscosity ---
 with tab_c3:
     col1, col2 = st.columns([1, 2])
     with col1:
         st.markdown("### 목표 물성 입력")
-        t3_ph_min = st.number_input("pH Min", 4.0, 9.0, 6.0, 0.1, key="t3_ph_min")
-        t3_ph_max = st.number_input("pH Max", 4.0, 9.0, 6.5, 0.1, key="t3_ph_max")
-        t3_visc = st.number_input("목표 점도", 100.0, 50000.0, 3000.0, 100.0, key="t3_visc")
+        t3_ph_min = st.number_input("pH Min (ph 4.0~7.2)", 4.0, 9.0, 6.0, 0.1, key="t3_ph_min")
+        t3_ph_max = st.number_input("pH Max (ph 4.0~7.2)", 4.0, 9.0, 6.5, 0.1, key="t3_ph_max")
+        t3_visc = st.number_input("목표 점도 (cP, 250~25000)", 100.0, 50000.0, 3000.0, 100.0, key="t3_visc")
         # 예측엔 목표점도를 1000으로 나눈 값으로 예측
         t3_visc_for_opt = visc_target / 1000
 
-        must_use_idx_mix = []
-        # 여기서는 점도 데이터셋 기준으로 원료 리스트를 보여줌 (pH데이터셋과 원료 순서가 같다면)
-        with st.expander("필수 포함 원료 선택"):
-            for i, name in enumerate(feat_phv): # model_phv의 feature 사용
-                if st.checkbox(name, key=f"t3_{i}"): must_use_idx_mix.append(i)
+        # must_use_idx_mix = []
+        # # 여기서는 점도 데이터셋 기준으로 원료 리스트를 보여줌 (pH데이터셋과 원료 순서가 같다면)
+        # with st.expander("필수 포함 원료 선택"):
+        #     for i, name in enumerate(feat_phv): # model_phv의 feature 사용
+        #         if st.checkbox(name, key=f"t3_{i}"): must_use_idx_mix.append(i)
+        must_use_idx_mix = expander_search_checklist(feat_all_ph, "필수 포함 원료 선택", "searh2", "t3")
         
+
         if st.button("실행 (Case 3)", type="primary"):
             with col2:
                 with st.spinner("Calculating..."):
@@ -467,16 +601,17 @@ with tab_c3:
                         if fails: st.caption(str(fails[0]))
                     else:
                         best = results[0]
-                        st.success(f"예측 결과 (목표 pH: {best['pred_ph']:.2f}, 목표점도: {best['pred_visc']*1000})")
+                        st.success(f"예측 결과 (예측 pH: {best['pred_ph']:.2f}, 예측점도: {round(best['pred_visc']*1000,0)})")
                         
                         res_df = pd.DataFrame({"원료": feat_phv})
                         for i, res in enumerate(results[:3]):
-                            header = f"R{i+1}(pH{res['pred_ph']:.1f}/Visc{res['pred_visc']:.0f})"
+                            header = f"R{i+1}(pH{res['pred_ph']:.1f}/Visc{res['pred_visc']:.0f}k)"
                             res_df[header] = res['recipe']
-                        # res_df = res_df.style.format(subset=res_df.columns[1:], formatter="{:.2f}")
-                        st.dataframe(res_df.round(2))
-                        # tn = f"{t3_ph_min}~{t3_ph_min}&t3_visc"
-                        # download_df_to_csv(res_df, tn, "pH&Viscosity")
+
+                        res_df = res_df.round(2)
+                        tn = f"{t3_ph_min}~{t3_ph_min}&{visc_target}"
+                        
+                        download_df_to_csv(res_df, tn, "pH&visc")
 
 
 

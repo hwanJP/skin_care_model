@@ -4,5 +4,5 @@ streamlit==1.47.0
 statsmodels==0.14.5
 numpy==2.0.2
 pandas==2.2.2
-scipy
+scipy==1.16.1
 scikit-learn
