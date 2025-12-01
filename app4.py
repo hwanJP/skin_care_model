@@ -3,7 +3,12 @@ import numpy as np
 import pandas as pd
 import pickle
 from scipy.optimize import minimize
-
+import os
+import jwt
+import hashlib
+import time
+from datetime import datetime, timedelta
+from streamlit_cookies_manager import EncryptedCookieManager
 DEBUG_MODE = False
 EPSILON = 0.01  # 선택된 원료가 반드시 0이 아니게 하기 위한 최소값
 PH_MIN = 4.0
@@ -481,11 +486,173 @@ def expander_search_checklist(ingredients, expander_name, key_check, key_search)
 
 
 # ================================
+# 3. JWT + 쿠키 기반 세션 관리 로그인 기능
+# ================================
+# 하드코딩된 로그인 정보
+VALID_USERNAME = "kolmar123@kolmar.co.kr"
+VALID_PASSWORD = "kolmar123"
+
+# 쿠키 관리자 초기화
+cookies = EncryptedCookieManager(
+    prefix="streamlit_login_",
+    password=os.getenv("COOKIE_PASSWORD", "default_password_change_in_production")
+)
+
+# JWT 설정
+JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+SESSION_DURATION = int(os.getenv("SESSION_DURATION", "86400"))  # 24시간 (초 단위)
+
+def hash_password(password):
+    """비밀번호를 SHA256으로 해시화"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_jwt_token(email):
+    """JWT 토큰 생성"""
+    payload = {
+        'email': email,
+        'exp': datetime.utcnow() + timedelta(seconds=SESSION_DURATION),
+        'iat': datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+
+def verify_jwt_token(token):
+    """JWT 토큰 검증"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        # 기존 토큰과의 호환성을 위해 'email' 또는 'username' 키 확인
+        email = payload.get('email') or payload.get('username')
+        return email
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+def check_login(email, password):
+    """로그인 확인 (하드코딩된 사용자 정보 사용)"""
+    if email == VALID_USERNAME and password == VALID_PASSWORD:
+        return True, "로그인 성공"
+    else:
+        return False, "아이디 또는 비밀번호가 올바르지 않습니다."
+
+def login_user(email, password):
+    """사용자 로그인 처리"""
+    success, message = check_login(email, password)
+    if success:
+        token = create_jwt_token(email)
+        cookies['auth_token'] = token
+        cookies.save()
+        return True
+    return False
+
+def logout_user():
+    """사용자 로그아웃 처리"""
+    try:
+        # 1. 쿠키에서 auth_token 완전 삭제
+        if 'auth_token' in cookies:
+            cookies['auth_token'] = ""  # 빈 문자열로 설정
+            del cookies['auth_token']    # 키 자체를 삭제
+            cookies.save()
+        
+        # 2. 세션 상태 초기화
+        if 'logged_in' in st.session_state:
+            del st.session_state['logged_in']
+        if 'username' in st.session_state:
+            del st.session_state['username']
+            
+    except Exception as e:
+        print(f"로그아웃 중 오류 발생: {e}")
+        # 오류가 발생해도 강제로 세션 상태 초기화
+        if 'logged_in' in st.session_state:
+            del st.session_state['logged_in']
+        if 'username' in st.session_state:
+            del st.session_state['username']
+
+def check_authentication():
+    """인증 상태 확인"""
+    # 쿠키가 준비되지 않았으면 False 반환
+    if not cookies.ready():
+        return False
+    
+    # 세션 상태에서 인증 확인
+    if st.session_state.get('logged_in', False):
+        return True
+    
+    # 쿠키에서 토큰 확인
+    if 'auth_token' in cookies and cookies['auth_token']:
+        try:
+            email = verify_jwt_token(cookies['auth_token'])
+            if email:
+                st.session_state['logged_in'] = True
+                st.session_state['username'] = email
+                return True
+            else:
+                # 토큰이 만료되었거나 유효하지 않음
+                logout_user()
+        except Exception as e:
+            # 토큰 검증 중 오류 발생시 로그아웃
+            print(f"토큰 검증 오류: {e}")
+            logout_user()
+    
+    return False
+
+def show_login_page():
+    """로그인 페이지"""
+    st.set_page_config(layout="centered", page_title="로그인")
+    
+    st.title("로그인")
+    st.markdown("---")
+    
+    with st.form("login_form"):
+        st.markdown("### 로그인 정보를 입력해주세요")
+        email = st.text_input("이메일", placeholder="이메일을 입력하세요")
+        password = st.text_input("비밀번호", type="password", placeholder="비밀번호를 입력하세요")
+        
+        submit_button = st.form_submit_button("로그인", use_container_width=True)
+        
+        if submit_button:
+            if email and password:
+                success = login_user(email, password)
+                if success:
+                    st.session_state.logged_in = True
+                    st.session_state.username = email
+                    st.success("로그인 성공!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ 이메일 또는 비밀번호가 올바르지 않습니다.")
+            else:
+                st.warning("⚠️ 이메일과 비밀번호를 모두 입력해주세요.")
+
+# ================================
+# 4. Streamlit UI (메인 앱)
+# ================================
+# 쿠키 로드
+if not cookies.ready():
+    st.stop()
+
+# 로그인 상태 확인
+if not check_authentication():
+    show_login_page()
+    st.stop()
+
+# ================================
 # 3. Streamlit UI
 # ================================
+# 페이지 설정
 st.set_page_config(layout="wide", page_title="pH·점도 레시피 예측")
-st.subheader("pH · 점도 기반 레시피 예측")
-st.caption("입력한 물성(pH, 점도)을 만족하는 최적의 원료 배합비(Total 100%)를 예측합니다.")
+
+# 로그아웃 버튼 (사이드바 또는 상단)
+col_logout, col_title = st.columns([1, 10])
+with col_logout:
+    if st.button("로그아웃"):
+        logout_user()
+        st.success("로그아웃되었습니다.")
+        time.sleep(1)
+        st.rerun()
+
+with col_title:
+    st.title("pH · 점도 기반 레시피 예측")
+    st.caption("입력한 물성(pH, 점도)을 만족하는 최적의 원료 배합비(Total 100%)를 예측합니다.")
 
 tab_zero, tab_c2, tab_c3 = st.tabs(["① pH 예측 (점도=0)", "② 점도 예측 (점도>0)", "③ pH + 점도 동시 예측"])
 
